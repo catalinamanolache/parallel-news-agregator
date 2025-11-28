@@ -1,6 +1,9 @@
 package org.example;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -10,7 +13,7 @@ public class Context {
     private List<String> JSONArticles;
     private List<String> categories;
     private List<String> languages;
-    private List<String> linkingWords;
+    public Set<String> linkingWords;
 
     // statistics variables
     public int duplicatesFound;
@@ -25,7 +28,7 @@ public class Context {
     public String topKeywordName;
     public int topKeywordArticles;
 
-    // data structure for collecting all articles, unsorted and duplicated
+    // data structure for collecting all articles, unsorted and duplicated, from articles.txt
     public ConcurrentLinkedQueue<Article> allArticles;
     public AtomicInteger fileIndex;
 
@@ -35,6 +38,12 @@ public class Context {
     // data structure for the final articles, sorted descending by published and without duplicates
     public List<Article> sortedArticlesPublished;
 
+    // hashmap for english keywords frequency
+    public ConcurrentHashMap<String, Integer> keywordsFreq;
+
+    // tasks queue for phase 3
+    public ConcurrentLinkedQueue<Runnable> tasks;
+
     // barrier for threads synchronization after each phase
     public CyclicBarrier barrier;
 
@@ -42,18 +51,20 @@ public class Context {
         this.threadCount = threadCount;
         this.JSONArticles = JSONArticles;
         this.languages = languages;
-        this.linkingWords = linkingWords;
+        this.linkingWords = new HashSet<>(linkingWords);
         this.barrier = new CyclicBarrier(threadCount);
         this.categories = categories;
         this.allArticles = new ConcurrentLinkedQueue<>();
         this.fileIndex = new AtomicInteger(0);
+        this.keywordsFreq = new ConcurrentHashMap<>();
+        this.tasks = new ConcurrentLinkedQueue<>();
     }
 
-    public List<String> getLinkingWords() {
+    public Set<String> getLinkingWords() {
         return linkingWords;
     }
 
-    public void setLinkingWords(List<String> linkingWords) {
+    public void setLinkingWords(Set<String> linkingWords) {
         this.linkingWords = linkingWords;
     }
 

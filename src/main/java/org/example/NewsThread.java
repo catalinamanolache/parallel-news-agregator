@@ -15,6 +15,8 @@ public class NewsThread extends Thread {
     private Context context;
     private ObjectMapper objectMapper;
 
+    private static final int CHUNK_SIZE = 500;
+
     public NewsThread(int threadId, Context context) {
         this.threadId = threadId;
         this.context = context;
@@ -32,20 +34,21 @@ public class NewsThread extends Thread {
             // phase 2: parse articles, remove duplicates, sort and compute statistics
             if (threadId == 0) {
                 processArticles();
+                createTasks();
             }
 
             context.barrier.await();
             // phase 3: compute keywords statistics and write logs to files
+            while (true) {
+                Runnable task = context.tasks.poll();
+                if (task == null) {
+                    break;
+                }
+                task.run();
+            }
+
             if (threadId == 0) {
-                for (String language : context.getLanguages()) {
-                    writeLanguage(language);
-                }
-
-                for (String category : context.getCategories()) {
-                    writeCategory(category);
-                }
-
-                writeAllArticles();
+                sortKeywords();
                 writeReports();
             }
 
@@ -57,6 +60,91 @@ public class NewsThread extends Thread {
             e.printStackTrace();
         }
 
+    }
+
+    private void sortKeywords() {
+        List<Map.Entry<String, Integer>> sortedList = new ArrayList<>(context.keywordsFreq.entrySet());
+
+        sortedList.sort(new Comparator<Map.Entry<String, Integer>>() {
+            @Override
+            public int compare(Map.Entry<String, Integer> o1, Map.Entry<String, Integer> o2) {
+                // descending by article count
+                int res = o2.getValue().compareTo(o1.getValue());
+
+                // ascending by word
+                if (res == 0) {
+                    return o1.getKey().compareTo(o2.getKey());
+                }
+                return res;
+            }
+        });
+
+        if (!sortedList.isEmpty()) {
+            context.topKeywordName = sortedList.get(0).getKey();
+            context.topKeywordArticles = sortedList.get(0).getValue();
+        }
+
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter("keywords_count.txt"))) {
+            for (Map.Entry<String, Integer> entry : sortedList) {
+                writer.write(entry.getKey() + " " + entry.getValue());
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void createTasks() {
+        context.tasks.add(this::writeAllArticles);
+
+        for (String language : context.getLanguages()) {
+            context.tasks.add(() -> writeLanguage(language));
+        }
+
+        for (String category : context.getCategories()) {
+            context.tasks.add(() -> writeCategory(category));
+        }
+
+
+        List<Article> englishArticles = new ArrayList<>();
+        for (Article article : context.sortedArticlesUuid) {
+            if (article.getLanguage().equals("english")) {
+                englishArticles.add(article);
+            }
+        }
+
+        int size = englishArticles.size();
+        for (int start = 0; start < size; start += CHUNK_SIZE) {
+            int end = Math.min(start + CHUNK_SIZE, size);
+
+            // each thread parses a different subsection of the list
+            List<Article> section = new ArrayList<>(englishArticles.subList(start, end));
+            context.tasks.add(() -> parseKeywordsSection(section));
+        }
+    }
+
+    private void parseKeywordsSection(List<Article> section) {
+        for (Article article : section) {
+            String rawText = article.getText().toLowerCase();
+
+            if (article.getText() == null) {
+                continue;
+            }
+
+            String[] splitText = rawText.split(" ");
+            Set<String> wordSet = new HashSet<>();
+
+            for (String token : splitText) {
+                String word = token.replaceAll("[^a-z]", "");
+                if (!context.linkingWords.contains(word) && !wordSet.contains(word)) {
+                    wordSet.add(word);
+                }
+            }
+
+            for (String word : wordSet) {
+                this.context.keywordsFreq.merge(word, 1, Integer::sum);
+            }
+        }
     }
 
     private void readAllArticles(){
@@ -153,7 +241,7 @@ public class NewsThread extends Thread {
         context.topLanguageArticles = topLanguageData.getValue();
 
         Map.Entry<String, Integer> topCategoryData = getMaxFromMap(categoryCount);
-        context.topCategoryName = topCategoryData.getKey();
+        context.topCategoryName = topCategoryData.getKey().replaceAll(",", "").replaceAll("\\s+", "_");
         context.topCategoryArticles = topCategoryData.getValue();
 
         Article mostRecentArticle = context.sortedArticlesPublished.get(0);
