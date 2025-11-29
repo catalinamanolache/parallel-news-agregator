@@ -2,7 +2,7 @@ package org.example;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
-import java.util.List;
+import java.util.Set;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Article {
@@ -13,7 +13,7 @@ public class Article {
     private String text;
     private String published;
     private String language;
-    private List<String> categories;
+    private Set<String> categories;
 
     public Article() {}
 
@@ -82,11 +82,11 @@ public class Article {
         this.language = language;
     }
 
-    public List<String> getCategories() {
+    public Set<String> getCategories() {
         return categories;
     }
 
-    public void setCategories(List<String> categories) {
+    public void setCategories(Set<String> categories) {
         this.categories = categories;
     }
 }

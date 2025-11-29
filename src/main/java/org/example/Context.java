@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class Context {
     private int threadCount;
     private List<String> JSONArticles;
-    private List<String> categories;
+    private Set<String> categories;
     private List<String> languages;
     public Set<String> linkingWords;
 
@@ -31,6 +31,10 @@ public class Context {
     // data structure for collecting all articles, unsorted and duplicated, from articles.txt
     public ConcurrentLinkedQueue<Article> allArticles;
     public AtomicInteger fileIndex;
+
+    // data structure for the frequency of articles' uuid and titles
+    public ConcurrentHashMap<String, Integer> uuidFreq;
+    public ConcurrentHashMap<String, Integer> titleFreq;
 
     // data structure for the final articles, sorted ascending by uuid and without duplicates
     public List<Article> sortedArticlesUuid;
@@ -53,11 +57,21 @@ public class Context {
         this.languages = languages;
         this.linkingWords = new HashSet<>(linkingWords);
         this.barrier = new CyclicBarrier(threadCount);
-        this.categories = categories;
+        this.categories = new HashSet<>(categories);
         this.allArticles = new ConcurrentLinkedQueue<>();
         this.fileIndex = new AtomicInteger(0);
         this.keywordsFreq = new ConcurrentHashMap<>();
         this.tasks = new ConcurrentLinkedQueue<>();
+        this.uuidFreq = new ConcurrentHashMap<>();
+        this.titleFreq = new ConcurrentHashMap<>();
+    }
+
+    public Set<String> getCategories() {
+        return categories;
+    }
+
+    public void setCategories(Set<String> categories) {
+        this.categories = categories;
     }
 
     public Set<String> getLinkingWords() {
@@ -74,14 +88,6 @@ public class Context {
 
     public void setLanguages(List<String> languages) {
         this.languages = languages;
-    }
-
-    public List<String> getCategories() {
-        return categories;
-    }
-
-    public void setCategories(List<String> categories) {
-        this.categories = categories;
     }
 
     public List<String> getJSONArticles() {

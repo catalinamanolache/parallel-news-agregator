@@ -15,7 +15,7 @@ public class NewsThread extends Thread {
     private Context context;
     private ObjectMapper objectMapper;
 
-    private static final int CHUNK_SIZE = 500;
+//    private static final int CHUNK_SIZE = 500;
 
     public NewsThread(int threadId, Context context) {
         this.threadId = threadId;
@@ -47,14 +47,11 @@ public class NewsThread extends Thread {
                 task.run();
             }
 
+            context.barrier.await();
+
             if (threadId == 0) {
                 sortKeywords();
                 writeReports();
-            }
-
-            // debug phase
-            if (threadId == 0) {
-                logArticles("logs.txt");
             }
         } catch (InterruptedException | BrokenBarrierException e) {
             e.printStackTrace();
@@ -114,6 +111,8 @@ public class NewsThread extends Thread {
         }
 
         int size = englishArticles.size();
+//        int CHUNK_SIZE = Math.max(1, size / context.getThreadCount());
+        int CHUNK_SIZE = 250;
         for (int start = 0; start < size; start += CHUNK_SIZE) {
             int end = Math.min(start + CHUNK_SIZE, size);
 
@@ -124,19 +123,21 @@ public class NewsThread extends Thread {
     }
 
     private void parseKeywordsSection(List<Article> section) {
-        for (Article article : section) {
-            String rawText = article.getText().toLowerCase();
+        Set<String> linkingWords = context.getLinkingWords();
 
+        for (Article article : section) {
             if (article.getText() == null) {
                 continue;
             }
 
-            String[] splitText = rawText.split(" ");
+            String rawText = article.getText().toLowerCase();
+            String[] splitText = rawText.split("\\s+");
             Set<String> wordSet = new HashSet<>();
 
             for (String token : splitText) {
-                String word = token.replaceAll("[^a-z]", "");
-                if (!context.linkingWords.contains(word) && !wordSet.contains(word)) {
+//                String word = token.replaceAll("[^a-z]", "");
+                String word = fastClean(token);
+                if (!word.isEmpty() && !linkingWords.contains(word)) {
                     wordSet.add(word);
                 }
             }
@@ -145,6 +146,17 @@ public class NewsThread extends Thread {
                 this.context.keywordsFreq.merge(word, 1, Integer::sum);
             }
         }
+    }
+
+    private String fastClean(String token) {
+        StringBuilder sb = new StringBuilder(token.length());
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c >= 'a' && c <= 'z') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     private void readAllArticles(){
@@ -164,6 +176,14 @@ public class NewsThread extends Thread {
                 // read all articles from the current file and add them
                 List<Article> articles = this.objectMapper.readValue(articleFile, new TypeReference<List<Article>>() {
                 });
+
+                for (Article article : articles) {
+                    String uuid = article.getUuid();
+                    String title = article.getTitle();
+
+                    this.context.uuidFreq.merge(uuid, 1, Integer::sum);
+                    this.context.titleFreq.merge(title, 1, Integer::sum);
+                }
                 this.context.allArticles.addAll(articles);
             } catch (IOException e) {
                 e.printStackTrace();
@@ -172,13 +192,13 @@ public class NewsThread extends Thread {
     }
 
     private void processArticles() {
-        Map<String, Integer> uuidFreq = new HashMap<>();
-        Map<String, Integer> titleFreq = new HashMap<>();
-
-        for (Article article : context.allArticles) {
-            incrementMapCount(uuidFreq, article.getUuid());
-            incrementMapCount(titleFreq, article.getTitle());
-        }
+//        Map<String, Integer> uuidFreq = new HashMap<>();
+//        Map<String, Integer> titleFreq = new HashMap<>();
+//
+//        for (Article article : context.allArticles) {
+//            incrementMapCount(uuidFreq, article.getUuid());
+//            incrementMapCount(titleFreq, article.getTitle());
+//        }
 
         List<Article> uniqueArticles = new ArrayList<>();
 
@@ -190,7 +210,7 @@ public class NewsThread extends Thread {
             String uuid = article.getUuid();
             String title = article.getTitle();
 
-            if (uuidFreq.get(uuid) == 1 && titleFreq.get(title) == 1) {
+            if (context.uuidFreq.get(uuid) == 1 && context.titleFreq.get(title) == 1) {
                 uniqueArticles.add(article);
 
                 // increment this author's total articles count, language count
@@ -198,7 +218,9 @@ public class NewsThread extends Thread {
                 incrementMapCount(authorCount, article.getAuthor());
                 incrementMapCount(languageCount, article.getLanguage());
                 for (String category : article.getCategories()) {
-                    incrementMapCount(categoryCount, category);
+                    if (context.getCategories().contains(category)) {
+                        incrementMapCount(categoryCount, category);
+                    }
                 }
             }
         }

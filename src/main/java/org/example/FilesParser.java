@@ -170,6 +170,7 @@ public class FilesParser {
             List<String> linkingWords = lines.stream()
                     .skip(1)
                     .map(String::trim)
+                    .map(String::toLowerCase)
                     .filter(s -> !s.isEmpty())
                     .limit(expectedCount)
                     .collect(Collectors.toList());
