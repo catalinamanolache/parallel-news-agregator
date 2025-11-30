@@ -15,30 +15,35 @@ public class NewsThread extends Thread {
     private Context context;
     private ObjectMapper objectMapper;
 
-//    private static final int CHUNK_SIZE = 500;
+    // this thread's local articles
+    private List<Article> threadArticles;
 
     public NewsThread(int threadId, Context context) {
         this.threadId = threadId;
         this.context = context;
         this.objectMapper = new ObjectMapper();
+        this.threadArticles = new ArrayList<>();
     }
 
     @Override
     public void run(){
-        // phase 1: read all articles and add them to the shared list
-        readAllArticles();
-
         try {
+            // phase 1: each thread reads articles from files
+            readArticlesLocally();
             context.barrier.await();
 
-            // phase 2: parse articles, remove duplicates, sort and compute statistics
+            // phase 2: each thread processes its local articles to remove duplicates and compute partial statistics
+            processArticlesLocally();
+            context.barrier.await();
+
+            // thread 0 merges all partial results and creates tasks for phase 3
             if (threadId == 0) {
-                processArticles();
+                mergeAndSortArticles();
                 createTasks();
             }
-
             context.barrier.await();
-            // phase 3: compute keywords statistics and write logs to files
+
+            // phase 3: each thread executes tasks from the shared tasks queue (writing files, parsing keywords)
             while (true) {
                 Runnable task = context.tasks.poll();
                 if (task == null) {
@@ -46,9 +51,9 @@ public class NewsThread extends Thread {
                 }
                 task.run();
             }
-
             context.barrier.await();
 
+            // phase 4: thread 0 sorts keywords and writes the final reports.txt file
             if (threadId == 0) {
                 sortKeywords();
                 writeReports();
@@ -56,127 +61,29 @@ public class NewsThread extends Thread {
         } catch (InterruptedException | BrokenBarrierException e) {
             e.printStackTrace();
         }
-
     }
 
-    private void sortKeywords() {
-        List<Map.Entry<String, Integer>> sortedList = new ArrayList<>(context.keywordsFreq.entrySet());
-
-        sortedList.sort(new Comparator<Map.Entry<String, Integer>>() {
-            @Override
-            public int compare(Map.Entry<String, Integer> o1, Map.Entry<String, Integer> o2) {
-                // descending by article count
-                int res = o2.getValue().compareTo(o1.getValue());
-
-                // ascending by word
-                if (res == 0) {
-                    return o1.getKey().compareTo(o2.getKey());
-                }
-                return res;
-            }
-        });
-
-        if (!sortedList.isEmpty()) {
-            context.topKeywordName = sortedList.get(0).getKey();
-            context.topKeywordArticles = sortedList.get(0).getValue();
-        }
-
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter("keywords_count.txt"))) {
-            for (Map.Entry<String, Integer> entry : sortedList) {
-                writer.write(entry.getKey() + " " + entry.getValue());
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void createTasks() {
-        context.tasks.add(this::writeAllArticles);
-
-        for (String language : context.getLanguages()) {
-            context.tasks.add(() -> writeLanguage(language));
-        }
-
-        for (String category : context.getCategories()) {
-            context.tasks.add(() -> writeCategory(category));
-        }
-
-
-        List<Article> englishArticles = new ArrayList<>();
-        for (Article article : context.sortedArticlesUuid) {
-            if (article.getLanguage().equals("english")) {
-                englishArticles.add(article);
-            }
-        }
-
-        int size = englishArticles.size();
-//        int CHUNK_SIZE = Math.max(1, size / context.getThreadCount());
-        int CHUNK_SIZE = 250;
-        for (int start = 0; start < size; start += CHUNK_SIZE) {
-            int end = Math.min(start + CHUNK_SIZE, size);
-
-            // each thread parses a different subsection of the list
-            List<Article> section = new ArrayList<>(englishArticles.subList(start, end));
-            context.tasks.add(() -> parseKeywordsSection(section));
-        }
-    }
-
-    private void parseKeywordsSection(List<Article> section) {
-        Set<String> linkingWords = context.getLinkingWords();
-
-        for (Article article : section) {
-            if (article.getText() == null) {
-                continue;
-            }
-
-            String rawText = article.getText().toLowerCase();
-            String[] splitText = rawText.split("\\s+");
-            Set<String> wordSet = new HashSet<>();
-
-            for (String token : splitText) {
-//                String word = token.replaceAll("[^a-z]", "");
-                String word = fastClean(token);
-                if (!word.isEmpty() && !linkingWords.contains(word)) {
-                    wordSet.add(word);
-                }
-            }
-
-            for (String word : wordSet) {
-                this.context.keywordsFreq.merge(word, 1, Integer::sum);
-            }
-        }
-    }
-
-    private String fastClean(String token) {
-        StringBuilder sb = new StringBuilder(token.length());
-        for (int i = 0; i < token.length(); i++) {
-            char c = token.charAt(i);
-            if (c >= 'a' && c <= 'z') {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
-    }
-
-    private void readAllArticles(){
+    private void readArticlesLocally(){
         while (true) {
             // get the next available file index
             int idx = this.context.fileIndex.getAndIncrement();
 
-            if (idx >= this.context.getJSONArticles().size()) {
+            if (idx >= this.context.JSONArticles.size()) {
                 break;
             }
 
             // open the current article and read its contents
-            String articlePath = this.context.getJSONArticles().get(idx);
+            String articlePath = this.context.JSONArticles.get(idx);
             File articleFile = new File(articlePath);
 
             try {
-                // read all articles from the current file and add them
-                List<Article> articles = this.objectMapper.readValue(articleFile, new TypeReference<List<Article>>() {
-                });
+                // read all articles from the current file and add them to the list
+                List<Article> articles = this.objectMapper.readValue(articleFile,
+                        new TypeReference<List<Article>>() {});
 
+                threadArticles.addAll(articles);
+
+                // update global frequency maps for duplicate detection
                 for (Article article : articles) {
                     String uuid = article.getUuid();
                     String title = article.getTitle();
@@ -184,44 +91,80 @@ public class NewsThread extends Thread {
                     this.context.uuidFreq.merge(uuid, 1, Integer::sum);
                     this.context.titleFreq.merge(title, 1, Integer::sum);
                 }
-                this.context.allArticles.addAll(articles);
             } catch (IOException e) {
                 e.printStackTrace();
             }
         }
     }
 
-    private void processArticles() {
-//        Map<String, Integer> uuidFreq = new HashMap<>();
-//        Map<String, Integer> titleFreq = new HashMap<>();
-//
-//        for (Article article : context.allArticles) {
-//            incrementMapCount(uuidFreq, article.getUuid());
-//            incrementMapCount(titleFreq, article.getTitle());
-//        }
+    private void processArticlesLocally() {
+        List<Article> localUniqueArticles = new ArrayList<>();
+        Map<String, Integer> localAuthorCount = new HashMap<>();
+        Map<String, Integer> localLanguageCount = new HashMap<>();
+        Map<String, Integer> localCategoryCount = new HashMap<>();
+        int localDuplicates = 0;
 
+        // process each article in this thread's local list
+        for (Article article : threadArticles) {
+            String uuid = article.getUuid();
+            String title = article.getTitle();
+
+            // check if the article is unique based on uuid and title frequency
+            if (context.uuidFreq.get(uuid) == 1 && context.titleFreq.get(title) == 1) {
+                localUniqueArticles.add(article);
+
+                // increment this author's total articles count, language count
+                // and all categories count
+                incrementMapCount(localAuthorCount, article.getAuthor());
+                incrementMapCount(localLanguageCount, article.getLanguage());
+                for (String category : article.getCategories()) {
+                    if (context.categories.contains(category)) {
+                        incrementMapCount(localCategoryCount, category);
+                    }
+                }
+            } else {
+                localDuplicates++;
+            }
+        }
+
+        // store this thread's partial results in the context variables
+        context.partialUniqueArticles.set(threadId, localUniqueArticles);
+        context.partialAuthorFreq.set(threadId, localAuthorCount);
+        context.partialLanguageFreq.set(threadId, localLanguageCount);
+        context.partialCategoryFreq.set(threadId, localCategoryCount);
+        context.duplicatesFound.addAndGet(localDuplicates);
+    }
+
+    private void mergeAndSortArticles() {
         List<Article> uniqueArticles = new ArrayList<>();
-
         Map<String, Integer> authorCount = new HashMap<>();
         Map<String, Integer> languageCount = new HashMap<>();
         Map<String, Integer> categoryCount = new HashMap<>();
 
-        for (Article article : context.allArticles) {
-            String uuid = article.getUuid();
-            String title = article.getTitle();
+        // merge partial results from each thread
+        for (int i = 0; i < context.threadCount; i++) {
+            List<Article> threadUniqueArticles = context.partialUniqueArticles.get(i);
+            Map<String, Integer> threadAuthorCount = context.partialAuthorFreq.get(i);
+            Map<String, Integer> threadLanguageCount = context.partialLanguageFreq.get(i);
+            Map<String, Integer> threadCategoryCount = context.partialCategoryFreq.get(i);
 
-            if (context.uuidFreq.get(uuid) == 1 && context.titleFreq.get(title) == 1) {
-                uniqueArticles.add(article);
+            // add this thread's unique articles to the global list
+            uniqueArticles.addAll(threadUniqueArticles);
 
-                // increment this author's total articles count, language count
-                // and all categories count
-                incrementMapCount(authorCount, article.getAuthor());
-                incrementMapCount(languageCount, article.getLanguage());
-                for (String category : article.getCategories()) {
-                    if (context.getCategories().contains(category)) {
-                        incrementMapCount(categoryCount, category);
-                    }
-                }
+            // merge this thread's author, language and category counts to the global maps
+            for (Map.Entry<String, Integer> entry : threadAuthorCount.entrySet()) {
+                authorCount.put(entry.getKey(),
+                        authorCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
+            }
+
+            for (Map.Entry<String, Integer> entry : threadLanguageCount.entrySet()) {
+                languageCount.put(entry.getKey(),
+                        languageCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
+            }
+
+            for (Map.Entry<String, Integer> entry : threadCategoryCount.entrySet()) {
+                categoryCount.put(entry.getKey(),
+                        categoryCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
             }
         }
 
@@ -234,6 +177,7 @@ public class NewsThread extends Thread {
             }
         });
 
+        // sort all articles descending by published, and ascending by uuid in case of equality
         context.sortedArticlesPublished = new ArrayList<>(uniqueArticles);
         context.sortedArticlesPublished.sort(new Comparator<Article>() {
             @Override
@@ -252,7 +196,6 @@ public class NewsThread extends Thread {
 
         // set statistics variables
         context.uniqueArticles = uniqueArticles.size();
-        context.duplicatesFound = context.allArticles.size() - uniqueArticles.size();
 
         Map.Entry<String, Integer> bestAuthorData = getMaxFromMap(authorCount);
         context.bestAuthorName = bestAuthorData.getKey();
@@ -266,6 +209,8 @@ public class NewsThread extends Thread {
         context.topCategoryName = topCategoryData.getKey().replaceAll(",", "").replaceAll("\\s+", "_");
         context.topCategoryArticles = topCategoryData.getValue();
 
+        // find the most recent article (first in sorted list), and in case of equality,
+        // the one with the smallest uuid
         Article mostRecentArticle = context.sortedArticlesPublished.get(0);
         for (Article article : context.sortedArticlesPublished) {
             if (article.getPublished().equals(mostRecentArticle.getPublished())) {
@@ -279,16 +224,125 @@ public class NewsThread extends Thread {
         context.mostRecentArticle = mostRecentArticle;
     }
 
+    private void createTasks() {
+        // add task for writing all_articles.txt
+        context.tasks.add(this::writeAllArticles);
+
+        // add tasks for writing language and category files
+        for (String language : context.languages) {
+            context.tasks.add(() -> writeLanguage(language));
+        }
+
+        for (String category : context.categories) {
+            context.tasks.add(() -> writeCategory(category));
+        }
+
+
+        // prepare list of english articles for keyword parsing
+        List<Article> englishArticles = new ArrayList<>();
+        for (Article article : context.sortedArticlesUuid) {
+            if (article.getLanguage().equals("english")) {
+                englishArticles.add(article);
+            }
+        }
+
+        // calculate chunk size based on number of articles and threads
+        int size = englishArticles.size();
+        int maxChunks = context.threadCount * 4;
+        int chunkSize = size / maxChunks;
+
+        // limit chunk size between 20 and 1000, to avoid too small or too large chunks
+        int adjustedChunkSize = Math.max(20, Math.min(chunkSize, 1000));
+
+
+        // add tasks for parsing keywords in english articles
+        for (int start = 0; start < size; start += adjustedChunkSize) {
+            int end = Math.min(start + adjustedChunkSize, size);
+
+            // each thread parses a different subsection of the list
+            List<Article> section = new ArrayList<>(englishArticles.subList(start, end));
+            context.tasks.add(() -> parseKeywordsSection(section));
+        }
+    }
+
+    private void sortKeywords() {
+        List<Map.Entry<String, Integer>> sortedList =
+                new ArrayList<>(context.keywordsFreq.entrySet());
+
+        sortedList.sort(new Comparator<Map.Entry<String, Integer>>() {
+            @Override
+            public int compare(Map.Entry<String, Integer> o1, Map.Entry<String, Integer> o2) {
+                // descending by article count
+                int res = o2.getValue().compareTo(o1.getValue());
+
+                // ascending by word
+                if (res == 0) {
+                    return o1.getKey().compareTo(o2.getKey());
+                }
+                return res;
+            }
+        });
+
+        // set top keyword statistics
+        context.topKeywordName = sortedList.get(0).getKey();
+        context.topKeywordArticles = sortedList.get(0).getValue();
+
+        // write keywords_count.txt file
+        try (BufferedWriter writer =
+                     new BufferedWriter(new FileWriter("keywords_count.txt"))) {
+            for (Map.Entry<String, Integer> entry : sortedList) {
+                writer.write(entry.getKey() + " " + entry.getValue());
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+
+    private void parseKeywordsSection(List<Article> section) {
+        Set<String> linkingWords = context.linkingWords;
+
+        // parse each article in the current section of articles
+        for (Article article : section) {
+            if (article.getText() == null) {
+                continue;
+            }
+
+            // format the article text and split it into tokens
+            String rawText = article.getText().toLowerCase();
+            String[] splitText = rawText.split("\\s+");
+            Set<String> wordSet = new HashSet<>();
+
+            // use a set to keep track of all unique words in the article, that are not a linking word
+            for (String token : splitText) {
+                String word = cleanToken(token);
+                if (!word.isEmpty() && !linkingWords.contains(word)) {
+                    wordSet.add(word);
+                }
+            }
+
+            // update global keywords frequency map with the words from this article
+            for (String word : wordSet) {
+                this.context.keywordsFreq.merge(word, 1, Integer::sum);
+            }
+        }
+    }
+
+
     private void writeLanguage(String language) {
         String filename = language + ".txt";
         List<Article> articlesInLanguage = new ArrayList<>();
 
+        // collect all articles in this language from the sorted list
         for (Article article : context.sortedArticlesUuid) {
             if (article.getLanguage().equals(language)) {
                 articlesInLanguage.add(article);
             }
         }
 
+        // only write the file if there are articles in this language
         if (articlesInLanguage.isEmpty()) {
             return;
         }
@@ -304,16 +358,20 @@ public class NewsThread extends Thread {
     }
 
     private void writeCategory(String category) {
-        String normalizedCategory = category.replaceAll(",", "").replaceAll("\\s+", "_");
+        String normalizedCategory = category
+                                .replaceAll(",", "")
+                                .replaceAll("\\s+", "_");
         String filename = normalizedCategory + ".txt";
-
         List<Article> articlesInCategory = new ArrayList<>();
+
+        // collect all articles in this category from the sorted list
         for (Article article : context.sortedArticlesUuid) {
             if (article.getCategories().contains(category)) {
                 articlesInCategory.add(article);
             }
         }
 
+        // only write the file if there are articles in this category
         if (articlesInCategory.isEmpty()) {
             return;
         }
@@ -344,25 +402,30 @@ public class NewsThread extends Thread {
         String filename = "reports.txt";
 
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(filename))) {
-            writer.write("duplicates_found - " + context.duplicatesFound);
+            writer.write("duplicates_found - " + context.duplicatesFound.get());
             writer.newLine();
 
             writer.write("unique_articles - " + context.uniqueArticles);
             writer.newLine();
 
-            writer.write("best_author - " + context.bestAuthorName + " " + context.bestAuthorArticles);
+            writer.write("best_author - " + context.bestAuthorName
+                        + " " + context.bestAuthorArticles);
             writer.newLine();
 
-            writer.write("top_language - " + context.topLanguageName + " " + context.topLanguageArticles);
+            writer.write("top_language - " + context.topLanguageName
+                        + " " + context.topLanguageArticles);
             writer.newLine();
 
-            writer.write("top_category - " + context.topCategoryName + " " + context.topCategoryArticles);
+            writer.write("top_category - " + context.topCategoryName
+                        + " " + context.topCategoryArticles);
             writer.newLine();
 
-            writer.write("most_recent_article - " + context.mostRecentArticle.getPublished() + " " + context.mostRecentArticle.getUrl());
+            writer.write("most_recent_article - " + context.mostRecentArticle.getPublished()
+                        + " " + context.mostRecentArticle.getUrl());
             writer.newLine();
 
-            writer.write("top_keyword_en - " + context.topKeywordName + " " + context.topKeywordArticles);
+            writer.write("top_keyword_en - " + context.topKeywordName + " "
+                        + context.topKeywordArticles);
             writer.newLine();
         } catch (IOException e) {
             e.printStackTrace();
@@ -390,55 +453,15 @@ public class NewsThread extends Thread {
         return new AbstractMap.SimpleEntry<>(maxKey, maxValue);
     }
 
-    private void logArticles(String filename) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filename))){
-            writer.write("Total articles parsed: " + context.allArticles.size());
-            writer.newLine();
-
-            writer.write("Total unique articles: " + context.uniqueArticles);
-            writer.newLine();
-
-            writer.write("Total duplicate articles: " + context.duplicatesFound);
-            writer.newLine();
-
-            writer.write("Best author: " + context.bestAuthorName + " - " + context.bestAuthorArticles);
-            writer.newLine();
-
-            writer.write("Top language: " + context.topLanguageName + " - " + context.topLanguageArticles);
-            writer.newLine();
-
-            writer.write("Top category: " + context.topCategoryName + " - " + context.topCategoryArticles);
-            writer.newLine();
-
-            writer.write("Most recent article: " + context.mostRecentArticle.getPublished() + "  " + context.mostRecentArticle.getUrl());
-            writer.newLine();
-
-            writer.write("--------------------------------------------------");
-            writer.newLine();
-
-            writer.write("Total sorted articles by uuid: " + context.sortedArticlesUuid.size());
-            writer.newLine();
-            for (Article a : context.sortedArticlesUuid) {
-                // Verificam null pentru a evita NullPointerException la printare
-                String uuid = a.getUuid() != null ? a.getUuid() : "null";
-                String title = a.getTitle() != null ? a.getTitle() : "null";
-
-                writer.write(uuid + " | " + title);
-                writer.newLine();
+    private String cleanToken(String token) {
+        // keep only lowercase letters a-z
+        StringBuilder sb = new StringBuilder(token.length());
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c >= 'a' && c <= 'z') {
+                sb.append(c);
             }
-
-            writer.write("Total sorted articles by published: " + context.sortedArticlesPublished.size());
-            writer.newLine();
-            for (Article a : context.sortedArticlesPublished) {
-                // Verificam null pentru a evita NullPointerException la printare
-                String published = a.getPublished() != null ? a.getPublished() : "null";
-                String uuid = a.getUuid() != null ? a.getUuid() : "null";
-
-                writer.write(uuid + " | " + published);
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
+        return sb.toString();
     }
 }

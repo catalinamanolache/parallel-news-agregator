@@ -14,7 +14,7 @@ public class Tema1 {
         String articlesFile = args[1];
         String auxiliaryFile = args[2];
 
-        FilesParser filesParser = new FilesParser(threadNumber, articlesFile, auxiliaryFile);
+        FilesParser filesParser = new FilesParser(articlesFile, auxiliaryFile);
         List<String> articles = new ArrayList<>(filesParser.parseArticles());
         List<String> languages = new ArrayList<>(filesParser.parseLanguages());
         List<String> categories = new ArrayList<>(filesParser.parseCategories());
