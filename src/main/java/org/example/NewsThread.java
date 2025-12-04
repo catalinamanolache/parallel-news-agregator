@@ -32,7 +32,8 @@ public class NewsThread extends Thread {
             readArticlesLocally();
             context.barrier.await();
 
-            // phase 2: each thread processes its local articles to remove duplicates and compute partial statistics
+            // phase 2: each thread processes its local articles to remove
+            // duplicates and compute partial statistics
             processArticlesLocally();
             context.barrier.await();
 
@@ -43,7 +44,8 @@ public class NewsThread extends Thread {
             }
             context.barrier.await();
 
-            // phase 3: each thread executes tasks from the shared tasks queue (writing files, parsing keywords)
+            // phase 3: each thread executes tasks from the shared tasks queue
+            // (writing files, parsing keywords)
             while (true) {
                 Runnable task = context.tasks.poll();
                 if (task == null) {
@@ -55,7 +57,7 @@ public class NewsThread extends Thread {
 
             // phase 4: thread 0 sorts keywords and writes the final reports.txt file
             if (threadId == 0) {
-                sortKeywords();
+                sortAndWriteKeywords();
                 writeReports();
             }
         } catch (InterruptedException | BrokenBarrierException e) {
@@ -64,10 +66,14 @@ public class NewsThread extends Thread {
     }
 
     private void readArticlesLocally(){
+        Map<String, Integer> localUuidFreq = new HashMap<>();
+        Map<String, Integer> localTitleFreq = new HashMap<>();
+
         while (true) {
             // get the next available file index
             int idx = this.context.fileIndex.getAndIncrement();
 
+            // if all files have been processed, stop processing
             if (idx >= this.context.JSONArticles.size()) {
                 break;
             }
@@ -77,23 +83,40 @@ public class NewsThread extends Thread {
             File articleFile = new File(articlePath);
 
             try {
-                // read all articles from the current file and add them to the list
+                // read all articles from the current file and add them to the local list
                 List<Article> articles = this.objectMapper.readValue(articleFile,
-                        new TypeReference<List<Article>>() {});
+                        new TypeReference<>() {});
 
                 threadArticles.addAll(articles);
 
-                // update global frequency maps for duplicate detection
+                // update local frequency maps for duplicate detection
                 for (Article article : articles) {
                     String uuid = article.getUuid();
                     String title = article.getTitle();
 
-                    this.context.uuidFreq.merge(uuid, 1, Integer::sum);
-                    this.context.titleFreq.merge(title, 1, Integer::sum);
+                    addMapCount(localTitleFreq, title, 1);
+                    addMapCount(localUuidFreq, uuid, 1);
                 }
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+
+        // update global frequency maps with this thread's local maps
+        for (Map.Entry<String, Integer> entry : localUuidFreq.entrySet()) {
+            String uuid = entry.getKey();
+            int count = entry.getValue();
+
+            // global uuid frequency map
+            this.context.uuidFreq.merge(uuid, count, Integer::sum);
+        }
+        
+        for (Map.Entry<String, Integer> entry : localTitleFreq.entrySet()) {
+            String title = entry.getKey();
+            int count = entry.getValue();
+
+            // global title frequency map
+            this.context.titleFreq.merge(title, count, Integer::sum);
         }
     }
 
@@ -115,11 +138,11 @@ public class NewsThread extends Thread {
 
                 // increment this author's total articles count, language count
                 // and all categories count
-                incrementMapCount(localAuthorCount, article.getAuthor());
-                incrementMapCount(localLanguageCount, article.getLanguage());
+                addMapCount(localAuthorCount, article.getAuthor(), 1);
+                addMapCount(localLanguageCount, article.getLanguage(), 1);
                 for (String category : article.getCategories()) {
                     if (context.categories.contains(category)) {
-                        incrementMapCount(localCategoryCount, category);
+                        addMapCount(localCategoryCount, category, 1);
                     }
                 }
             } else {
@@ -151,20 +174,17 @@ public class NewsThread extends Thread {
             // add this thread's unique articles to the global list
             uniqueArticles.addAll(threadUniqueArticles);
 
-            // merge this thread's author, language and category counts to the global maps
+            // add this thread's author, language and category counts to the global maps
             for (Map.Entry<String, Integer> entry : threadAuthorCount.entrySet()) {
-                authorCount.put(entry.getKey(),
-                        authorCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
+                addMapCount(authorCount, entry.getKey(), entry.getValue());
             }
 
             for (Map.Entry<String, Integer> entry : threadLanguageCount.entrySet()) {
-                languageCount.put(entry.getKey(),
-                        languageCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
+                addMapCount(languageCount, entry.getKey(), entry.getValue());
             }
 
             for (Map.Entry<String, Integer> entry : threadCategoryCount.entrySet()) {
-                categoryCount.put(entry.getKey(),
-                        categoryCount.getOrDefault(entry.getKey(), 0) + entry.getValue());
+                addMapCount(categoryCount, entry.getKey(), entry.getValue());
             }
         }
 
@@ -206,7 +226,8 @@ public class NewsThread extends Thread {
         context.topLanguageArticles = topLanguageData.getValue();
 
         Map.Entry<String, Integer> topCategoryData = getMaxFromMap(categoryCount);
-        context.topCategoryName = topCategoryData.getKey().replaceAll(",", "").replaceAll("\\s+", "_");
+        context.topCategoryName = topCategoryData.getKey().replaceAll(",", "").
+                replaceAll("\\s+", "_");
         context.topCategoryArticles = topCategoryData.getValue();
 
         // find the most recent article (first in sorted list), and in case of equality,
@@ -254,7 +275,6 @@ public class NewsThread extends Thread {
         // limit chunk size between 20 and 1000, to avoid too small or too large chunks
         int adjustedChunkSize = Math.max(20, Math.min(chunkSize, 1000));
 
-
         // add tasks for parsing keywords in english articles
         for (int start = 0; start < size; start += adjustedChunkSize) {
             int end = Math.min(start + adjustedChunkSize, size);
@@ -265,10 +285,11 @@ public class NewsThread extends Thread {
         }
     }
 
-    private void sortKeywords() {
+    private void sortAndWriteKeywords() {
         List<Map.Entry<String, Integer>> sortedList =
                 new ArrayList<>(context.keywordsFreq.entrySet());
 
+        // sort keywords by descending article count, and ascending by word in case of equality
         sortedList.sort(new Comparator<Map.Entry<String, Integer>>() {
             @Override
             public int compare(Map.Entry<String, Integer> o1, Map.Entry<String, Integer> o2) {
@@ -299,8 +320,6 @@ public class NewsThread extends Thread {
         }
     }
 
-
-
     private void parseKeywordsSection(List<Article> section) {
         Set<String> linkingWords = context.linkingWords;
 
@@ -325,11 +344,10 @@ public class NewsThread extends Thread {
 
             // update global keywords frequency map with the words from this article
             for (String word : wordSet) {
-                this.context.keywordsFreq.merge(word, 1, Integer::sum);
+                context.keywordsFreq.merge(word, 1, Integer::sum);
             }
         }
     }
-
 
     private void writeLanguage(String language) {
         String filename = language + ".txt";
@@ -432,8 +450,8 @@ public class NewsThread extends Thread {
         }
     }
 
-    private void incrementMapCount(Map<String, Integer> map, String key) {
-        map.put(key, map.getOrDefault(key, 0) + 1);
+    private void addMapCount(Map<String, Integer> map, String key, int value) {
+        map.put(key, map.getOrDefault(key, 0) + value);
     }
 
     private AbstractMap.SimpleEntry<String, Integer> getMaxFromMap(Map<String, Integer> map) {
